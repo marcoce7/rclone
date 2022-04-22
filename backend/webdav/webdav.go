@@ -230,6 +230,7 @@ type Fs struct {
 	hasOCSHA1          bool          // set if can use owncloud style checksums for SHA1
 	hasMESHA1          bool          // set if can use fastmail style checksums for SHA1
 	RFC3230            bool          // Supports RFC3230 Digest(s)/Hashes
+	canLinkWithMacaroon bool	 // Support link share via Macaroon
 
 	// List the checksum type the remote (potentially) supports
 	hasMD5             bool
@@ -655,6 +656,7 @@ func (f *Fs) setQuirks(ctx context.Context, vendor string) error {
 		f.hasADLER32 = true
 		f.RFC3230 = true
 		f.canStream = true
+		f.canLinkWithMacaroon = true
 	case "fastmail":
 		f.canStream = true
 		f.precision = time.Second
@@ -731,10 +733,6 @@ func (f *Fs) setQuirks(ctx context.Context, vendor string) error {
 		// so we must perform an extra check to detect this
 		// condition and return a proper error code.
 		f.checkBeforePurge = true
-	case "rclone":
-		f.canStream = true
-		f.precision = time.Second
-		f.useOCMtime = true
 	case "other":
 	default:
 		fs.Debugf(f, "Unknown vendor %q", vendor)
@@ -814,7 +812,7 @@ func (f *Fs) listAll(ctx context.Context, dir string, directoriesOnly bool, file
 			"Depth": depth,
 		},
 	}
-	if f.hasOCMD5 || f.hasOCSHA1 {
+	if f.hasMD5 || f.hasSHA1 {
 		opts.Body = bytes.NewBuffer(owncloudProps)
 	}
 	var result api.Multistatus
@@ -1324,6 +1322,15 @@ func (f *Fs) Hashes() hash.Set {
 	if f.hasOCSHA1 || f.hasMESHA1 {
 		hashes.Add(hash.SHA1)
 	}
+	if f.hasSHA256 {
+		hashes.Add(hash.SHA256)
+	}
+	if f.hasSHA512 {
+		hashes.Add(hash.SHA512)
+	}
+	if f.hasADLER32 {
+		hashes.Add(hash.ADLER32)
+	}
 	return hashes
 }
 
@@ -1771,6 +1778,75 @@ func (o *Object) Remove(ctx context.Context) error {
 	})
 }
 
+// PublicLink generates a public read-only link to the remote path
+func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, unlink bool) (link string, err error) {
+
+	if(!f.canLinkWithMacaroon) {
+		return "", errors.New("link not supported.")
+	}
+
+	if(unlink) {
+		return "", errors.New("Unlink not supported (invalidation of Macaroons not implemented).")
+	}
+
+	// dCache supports file sharing via Macaroons.
+	// https://dcache.org/old/manuals/UserGuide-7.2/webdav.shtml#requesting-macaroons
+
+	fs.Debugf(f, "attempting to share '%s'", remote)
+
+	// FIXME: Common dCache default is max expire 168h (1 week), can we set
+	// a vendor-specific default for this?
+
+	// ISO 8601 time string or interval, use the latter to only rely
+	// on server clock.
+	valid := "PT" + strings.ToUpper(time.Duration(expire).Truncate(time.Second).String())
+
+	mreq := []byte(`{"caveats":["activity:LIST,DOWNLOAD"],"validity": "` + valid + `"}`)
+
+	opts := rest.Opts {
+		Method:		"POST",
+		Path:		f.filePath(remote),
+		ContentType:	"application/macaroon-request",
+		Body:		bytes.NewBuffer(mreq),
+	}
+        var resp *http.Response
+        err = f.pacer.Call(func() (bool, error) {
+                resp, err = f.srv.Call(ctx, &opts)
+		// FIXME: The retry doesn't work here, only the first POST
+		// gets the body as intended.
+                return f.shouldRetry(ctx, resp, err)
+        })
+
+	if(err != nil) {
+		return "", err
+	}
+
+	type Uri struct {
+		TargetWithMacaroon string
+		BaseWithMacaroon string
+		Target string
+		Base string
+	}
+	type MacaroonResponse struct {
+		Macaroon string
+		Uri Uri
+	}
+
+	var macaroon MacaroonResponse
+
+	err = rest.DecodeJSON(resp, &macaroon)
+
+	if(err != nil) {
+		return "", err
+	}
+
+	if(macaroon.Uri.TargetWithMacaroon == "") {
+		return "", errors.New("Got response, but TargetWithMacaroon was empty.")
+	}
+
+	return macaroon.Uri.TargetWithMacaroon,nil
+}
+
 // Check the interfaces are satisfied
 var (
 	_ fs.Fs          = (*Fs)(nil)
@@ -1782,4 +1858,5 @@ var (
 	_ fs.ListPer     = (*Fs)(nil)
 	_ fs.Abouter     = (*Fs)(nil)
 	_ fs.Object      = (*Object)(nil)
+	_ fs.PublicLinker = (*Fs)(nil)
 )
