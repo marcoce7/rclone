@@ -3,6 +3,8 @@ package api
 
 import (
 	"encoding/xml"
+	"encoding/base64"
+	"encoding/hex"
 	"regexp"
 	"strconv"
 	"strings"
@@ -75,6 +77,7 @@ type Prop struct {
 	Size         int64     `xml:"DAV: prop>getcontentlength,omitempty"`
 	Modified     Time      `xml:"DAV: prop>getlastmodified,omitempty"`
 	Checksums    []string  `xml:"prop>checksums>checksum,omitempty"`
+	DChecksums    []string  `xml:"prop>Checksums,omitempty"`
 	Permissions  string    `xml:"prop>permissions,omitempty"`
 	MESha1Hex    *string   `xml:"ME: prop>sha1hex,omitempty"` // Fastmail-specific sha1 checksum
 }
@@ -129,6 +132,41 @@ func (p *Prop) Hashes() (hashes map[hash.Type]string) {
 					hashes[hash.SHA1] = checksum[5:]
 				case strings.HasPrefix(checksum, "md5:"):
 					hashes[hash.MD5] = checksum[4:]
+				}
+			}
+		}
+		return hashes
+	} else if len(p.DChecksums) > 0 {
+		for _, checksums := range p.DChecksums {
+			for _, checksum := range strings.Split(checksums, ",") {
+				var ht hash.Type
+				encval := ""
+				checksumlc := strings.ToLower(checksum)
+				switch {
+				case strings.HasPrefix(checksumlc, "md5="):
+					encval = checksum[4:]
+					ht = hash.MD5
+				case strings.HasPrefix(checksumlc, "sha="):
+					encval = checksum[4:]
+					ht = hash.SHA1
+				case strings.HasPrefix(checksumlc, "sha-256="):
+					encval = checksum[8:]
+					ht = hash.SHA256
+				case strings.HasPrefix(checksumlc, "sha-512="):
+					encval = checksum[8:]
+					ht = hash.SHA512
+				case strings.HasPrefix(checksumlc, "adler32="):
+					hashes[hash.ADLER32] = checksumlc[8:]
+				}
+				if(encval != "") {
+					decoded, err := base64.StdEncoding.DecodeString(encval)
+					if err == nil {
+						hs := hex.EncodeToString(decoded)
+						//fs.Debugf(nil, "%s in %s Base64-decoded %q hex %s", ht.String(), encval, decoded, hs)
+						hashes[ht] = hs
+					} else {
+						fs.Debugf(nil, "Base64 decode error: %s", err)
+					}
 				}
 			}
 		}

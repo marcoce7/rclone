@@ -79,6 +79,9 @@ func init() {
 			Name: "vendor",
 			Help: "Name of the WebDAV site/service/software you are using.",
 			Examples: []fs.OptionExample{{
+				Value: "dcache",
+				Help:  "dCache",
+			}, {
 				Value: "fastmail",
 				Help:  "Fastmail Files",
 			}, {
@@ -219,12 +222,22 @@ type Fs struct {
 	canStream          bool          // set if can stream
 	canTus             bool          // supports the TUS upload protocol
 	useOCMtime         bool          // set if can use X-OC-Mtime
+	useOCChecksum      bool          // set if can use OC-Checksum
 	propsetMtime       bool          // set if can use propset
 	retryWithZeroDepth bool          // some vendors (sharepoint) won't list files when Depth is 1 (our default)
 	checkBeforePurge   bool          // enables extra check that directory to purge really exists
 	hasOCMD5           bool          // set if can use owncloud style checksums for MD5
 	hasOCSHA1          bool          // set if can use owncloud style checksums for SHA1
 	hasMESHA1          bool          // set if can use fastmail style checksums for SHA1
+	RFC3230            bool          // Supports RFC3230 Digest(s)/Hashes
+
+	// List the checksum type the remote (potentially) supports
+	hasMD5             bool
+	hasSHA1            bool
+	hasSHA256          bool
+	hasSHA512          bool
+	hasADLER32         bool
+
 	ntlmAuthMu         sync.Mutex    // mutex to serialize NTLM auth roundtrips
 	chunksUploadURL    string        // upload URL for nextcloud chunked
 	canChunk           bool          // set if nextcloud and nextcloud_chunk_size is set
@@ -241,7 +254,10 @@ type Object struct {
 	size        int64     // size of the object
 	modTime     time.Time // modification time of the object
 	sha1        string    // SHA-1 of the object content if known
+	sha256      string    // SHA-256 of the object content if known
+	sha512      string    // SHA-512 of the object content if known
 	md5         string    // MD5 of the object content if known
+	adler32     string    // ADLER-32 of the object content if known
 }
 
 // ------------------------------------------------------------
@@ -630,6 +646,15 @@ var nextCloudURLRegex = regexp.MustCompile(`^(.*)/dav/files/([^/]+)`)
 // setQuirks adjusts the Fs for the vendor passed in
 func (f *Fs) setQuirks(ctx context.Context, vendor string) error {
 	switch vendor {
+	case "dcache":
+		// FIXME: Figure out if we can set more of these
+		f.hasMD5 = true
+		f.hasSHA1 = true
+		f.hasSHA256 = true
+		f.hasSHA512 = true
+		f.hasADLER32 = true
+		f.RFC3230 = true
+		f.canStream = true
 	case "fastmail":
 		f.canStream = true
 		f.precision = time.Second
@@ -751,9 +776,12 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 
 // Read the normal props, plus the checksums
 //
+// OwnCloud:
 // <oc:checksums><oc:checksum>SHA1:f572d396fae9206628714fb2ce00f72e94f2258f MD5:b1946ac92492d2347c6235b4d2611184 ADLER32:084b021f</oc:checksum></oc:checksums>
+// dCache:
+// <d:prop><ns1:Checksums>adler32=fcb35243,md5=zc4Ybc/TrkV+JgxX08nPHw==</ns1:Checksums></d:prop>
 var owncloudProps = []byte(`<?xml version="1.0"?>
-<d:propfind  xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+<d:propfind  xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns" xmlns:dc="http://www.dcache.org/2013/webdav">
  <d:prop>
   <d:displayname />
   <d:getlastmodified />
@@ -762,6 +790,7 @@ var owncloudProps = []byte(`<?xml version="1.0"?>
   <d:getcontenttype />
   <oc:checksums />
   <oc:permissions />
+  <dc:Checksums />
  </d:prop>
 </d:propfind>
 `)
@@ -1358,13 +1387,22 @@ func (o *Object) Remote() string {
 	return o.remote
 }
 
-// Hash returns the SHA1 or MD5 of an object returning a lowercase hex string
+// Hash returns a hash of an object returning a lowercase hex string
 func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
-	if t == hash.MD5 && o.fs.hasOCMD5 {
+	if t == hash.MD5 && (o.fs.hasMD5 || o.fs.hasOCMD5) {
 		return o.md5, nil
 	}
-	if t == hash.SHA1 && (o.fs.hasOCSHA1 || o.fs.hasMESHA1) {
+	if t == hash.SHA1 && (o.fs.hasSHA1 || o.fs.hasOCSHA1 || o.fs.hasMESHA1) {
 		return o.sha1, nil
+	}
+	if t == hash.SHA256 && o.fs.hasSHA256 {
+		return o.sha256, nil
+	}
+	if t == hash.SHA512 && o.fs.hasSHA512 {
+		return o.sha512, nil
+	}
+	if t == hash.ADLER32 && o.fs.hasADLER32 {
+		return o.adler32, nil
 	}
 	return "", hash.ErrUnsupported
 }
@@ -1385,13 +1423,22 @@ func (o *Object) setMetaData(info *api.Prop) (err error) {
 	o.hasMetaData = true
 	o.size = info.Size
 	o.modTime = time.Time(info.Modified)
-	if o.fs.hasOCMD5 || o.fs.hasOCSHA1 || o.fs.hasMESHA1 {
+	if o.fs.hasOCMD5 || o.fs.hasOCSHA1 || o.fs.hasMESHA1 || o.fs.hasMD5 || o.fs.hasSHA1 || o.fs.hasSHA256 || o.fs.hasSHA512 || o.fs.hasADLER32 {
 		hashes := info.Hashes()
-		if o.fs.hasOCSHA1 || o.fs.hasMESHA1 {
+		if o.fs.hasSHA512 {
+			o.sha512 = hashes[hash.SHA512]
+		}
+		if o.fs.hasSHA256 {
+			o.sha256 = hashes[hash.SHA256]
+		}
+		if o.fs.hasSHA1 || o.fs.hasOCSHA1 || o.fs.hasMESHA1 {
 			o.sha1 = hashes[hash.SHA1]
 		}
-		if o.fs.hasOCMD5 {
+		if o.fs.hasMD5 || o.fs.hasOCMD5 {
 			o.md5 = hashes[hash.MD5]
+		}
+		if o.fs.hasADLER32 {
+			o.adler32 = hashes[hash.ADLER32]
 		}
 	}
 	return nil
@@ -1596,6 +1643,78 @@ func (o *Object) extraHeaders(ctx context.Context, src fs.ObjectInfo) map[string
 			if md5, _ := src.Hash(ctx, hash.MD5); md5 != "" {
 				extraHeaders["OC-Checksum"] = "MD5:" + md5
 			}
+		}
+	}
+	if o.fs.RFC3230 {
+		type digest struct {
+			ht string
+			prio float64
+		}
+		digests := []digest{}
+		currprio := 1.0
+		// Order by strength in combination with whether they are
+		// supported by other storage systems.
+		if o.fs.hasMD5 {
+			if md5, _ := src.Hash(ctx, hash.MD5); md5 != "" {
+				digests = append(digests, digest{"md5", currprio})
+			} else {
+				digests = append(digests, digest{"md5", -currprio})
+			}
+			currprio -= 0.1
+		}
+		if o.fs.hasSHA1 {
+			if sha1, _ := src.Hash(ctx, hash.SHA1); sha1 != "" {
+				digests = append(digests, digest{"sha", currprio})
+			} else {
+				digests = append(digests, digest{"sha", -currprio})
+			}
+			currprio -= 0.1
+		}
+		if o.fs.hasSHA256 {
+			if sha256, _ := src.Hash(ctx, hash.SHA256); sha256 != "" {
+				digests = append(digests, digest{"sha-256", currprio})
+			} else {
+				digests = append(digests, digest{"sha-256", -currprio})
+			}
+			currprio -= 0.1
+		}
+		if o.fs.hasADLER32 {
+			if adler32, _ := src.Hash(ctx, hash.ADLER32); adler32 != "" {
+				digests = append(digests, digest{"adler32", currprio})
+			} else {
+				digests = append(digests, digest{"adler32", -currprio})
+			}
+			currprio -= 0.1
+		}
+		if o.fs.hasSHA512 {
+			if sha512, _ := src.Hash(ctx, hash.SHA512); sha512 != "" {
+				digests = append(digests, digest{"sha-512", currprio})
+			} else {
+				digests = append(digests, digest{"sha-512", -currprio})
+			}
+			currprio -= 0.1
+		}
+		wdstr := ""
+		// First try with types having actual checksum values,
+		// if none (ie. rcat/stream) then retry with supported ones.
+		for _,flip := range []bool{false, true} {
+			for _,d := range digests {
+				if(flip) {
+					d.prio = -d.prio
+				}
+				if(d.prio > 0) {
+					if(wdstr != "") {
+						wdstr += ","
+					}
+					wdstr += d.ht + fmt.Sprintf(";q=%.1f", d.prio)
+				}
+			}
+			if(wdstr != "") {
+				break
+			}
+		}
+		if(wdstr != "") {
+			extraHeaders["Want-Digest"] = wdstr
 		}
 	}
 	return extraHeaders

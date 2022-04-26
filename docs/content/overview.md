@@ -67,7 +67,7 @@ Here is an overview of the major features of each cloud storage system.
 | Storj                        | -                 | R       | No               | No              | -         | -        |
 | Uloz.to                      | MD5, SHA256 ¹³    | -       | No               | Yes             | -         | -        |
 | Uptobox                      | -                 | -       | No               | Yes             | -         | -        |
-| WebDAV                       | MD5, SHA1 ³       | R ⁴     | Depends          | No              | -         | -        |
+| WebDAV                       | Varies ³          | R ⁴     | Depends          | No              | -         | -        |
 | Yandex Disk                  | MD5               | R/W     | No               | No              | R         | -        |
 | Zoho WorkDrive               | -                 | -       | No               | No              | -         | -        |
 | The local filesystem         | All               | DR/W    | Depends          | No              | -         | DRWU     |
@@ -79,7 +79,7 @@ This is an SHA256 sum of all the 4 MiB block SHA256s.
 ² SFTP supports checksums if the same login has shell access and
 `md5sum` or `sha1sum` as well as `echo` are in the remote's PATH.
 
-³ WebDAV supports hashes when used with Fastmail Files, Owncloud and Nextcloud only.
+³ WebDAV supports hashes when used with Fastmail Files, Owncloud (MD5 and SHA1), Nextcloud (SHA1) or dCache (ADLER32, MD5, SHA1, SHA256 and SHA512).
 
 ⁴ WebDAV supports modtimes when used with Fastmail Files, Owncloud and Nextcloud
 only.
