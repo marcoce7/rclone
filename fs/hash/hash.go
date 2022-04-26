@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"hash"
 	"hash/crc32"
+	"hash/adler32"
 	"io"
 	"strings"
 
@@ -102,6 +103,9 @@ var (
 
 	// XXH128 indicates XXH128 support, also known as XXH3-128, a variant of xxHash
 	XXH128 Type
+
+	// ADLER32 indicates Adler-32 support
+	ADLER32 Type
 )
 
 type xxh128Hasher struct {
@@ -124,6 +128,7 @@ func init() {
 	BLAKE3 = RegisterHash("blake3", "BLAKE3", 64, func() hash.Hash { return blake3.New() })
 	XXH3 = RegisterHash("xxh3", "XXH3", 16, func() hash.Hash { return xxh3.New() })
 	XXH128 = RegisterHash("xxh128", "XXH128", 32, func() hash.Hash { return &xxh128Hasher{} })
+	ADLER32 = RegisterHash("adler32", "ADLER-32", 8, func() hash.Hash { return adler32.New() })
 }
 
 // Supported returns a set of all the supported hashes by
